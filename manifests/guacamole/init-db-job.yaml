@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: guacamole-init-db
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  template:
+    spec:
+      containers:
+      - name: init-db
+        image: alpine:3.18
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          apk add --no-cache postgresql-client curl
+          echo "Waiting for PostgreSQL to be ready..."
+          until PGPASSWORD=guacpassword psql -h guacamole-postgres -U guacuser -d guacdb -c '\q' 2>/dev/null; do
+            sleep 2
+          done
+          echo "Downloading Guacamole schema..."
+          curl -sL https://raw.githubusercontent.com/apache/guacamole-client/1.5.4/extensions/guacamole-auth-jdbc/modules/guacamole-auth-jdbc-postgresql/schema/001-create-schema.sql -o schema.sql
+          curl -sL https://raw.githubusercontent.com/apache/guacamole-client/1.5.4/extensions/guacamole-auth-jdbc/modules/guacamole-auth-jdbc-postgresql/schema/002-create-admin-user.sql -o admin.sql
+          echo "Initializing database..."
+          PGPASSWORD=guacpassword psql -h guacamole-postgres -U guacuser -d guacdb -f schema.sql
+          PGPASSWORD=guacpassword psql -h guacamole-postgres -U guacuser -d guacdb -f admin.sql
+          echo "Database initialized successfully!"
+      restartPolicy: OnFailure

@@ -1,0 +1,18 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: guacamole-ingress
+  annotations:
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+  - host: guacamole.cluster.k8s
+    http:
+      paths:
+      - path: /guacamole
+        pathType: Prefix
+        backend:
+          service:
+            name: guacamole-web
+            port:
+              number: 8080
