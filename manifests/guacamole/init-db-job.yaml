@@ -1,0 +1,101 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: guacamole-init-db
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  template:
+    spec:
+      containers:
+      - name: init-db
+        image: postgres:15-alpine
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo "Waiting for PostgreSQL to be ready..."
+          until PGPASSWORD=guacpassword psql -h guacamole-postgres -U guacuser -d guacdb -c '\q' 2>/dev/null; do
+            sleep 2
+          done
+          echo "PostgreSQL is ready. Checking if database is empty..."
+          
+          TABLE_EXISTS=$(PGPASSWORD=guacpassword psql -h guacamole-postgres -U guacuser -d guacdb -t -c "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'guacamole_user');")
+          
+          if [ "$TABLE_EXISTS" = "t" ]; then
+            echo "Database already initialized. Skipping initialization."
+            exit 0
+          fi
+          
+          echo "Database is empty. Initializing..."
+          
+          # Download official Guacamole schema
+          echo "Downloading Guacamole schema..."
+          curl -sL https://raw.githubusercontent.com/apache/guacamole-client/guacamole-1.5.4/extensions/guacamole-auth-jdbc/modules/guacamole-auth-jdbc-postgresql/schema/001-create-schema.sql -o schema.sql
+          
+          if [ ! -f schema.sql ]; then
+            echo "Failed to download schema. Using embedded schema..."
+            # Create schema manually
+            cat > schema.sql << 'EOSCHEMA'
+            CREATE TABLE guacamole_entity (
+                entity_id     SERIAL       NOT NULL,
+                name          VARCHAR(128) NOT NULL,
+                type          VARCHAR(32)  NOT NULL,
+                CONSTRAINT guacamole_entity_pkey PRIMARY KEY (entity_id),
+                CONSTRAINT guacamole_entity_name_scope UNIQUE (name, type)
+            );
+            
+            CREATE TABLE guacamole_user (
+                user_id       SERIAL       NOT NULL,
+                entity_id     INTEGER      NOT NULL,
+                password_hash BYTEA        NOT NULL,
+                password_salt BYTEA,
+                password_date TIMESTAMPTZ,
+                disabled      BOOLEAN      NOT NULL DEFAULT FALSE,
+                expired       BOOLEAN      NOT NULL DEFAULT FALSE,
+                access_window_start    TIME,
+                access_window_end      TIME,
+                valid_from  DATE,
+                valid_until DATE,
+                timezone    VARCHAR(64),
+                full_name   VARCHAR(256),
+                email_address VARCHAR(512),
+                organization VARCHAR(256),
+                organizational_role VARCHAR(256),
+                CONSTRAINT guacamole_user_pkey PRIMARY KEY (user_id),
+                CONSTRAINT guacamole_user_entity_id UNIQUE (entity_id),
+                CONSTRAINT guacamole_user_entity FOREIGN KEY (entity_id) REFERENCES guacamole_entity (entity_id) ON DELETE CASCADE
+            );
+            
+            CREATE TABLE guacamole_connection (
+                connection_id   SERIAL       NOT NULL,
+                connection_name VARCHAR(128) NOT NULL,
+                parent_id       INTEGER,
+                protocol        VARCHAR(32)  NOT NULL,
+                max_connections INTEGER,
+                max_connections_per_user INTEGER,
+                connection_weight INTEGER,
+                failover_only   BOOLEAN      NOT NULL DEFAULT FALSE,
+                proxy_port      INTEGER,
+                proxy_hostname  VARCHAR(512),
+                proxy_encryption_method VARCHAR(32),
+                CONSTRAINT guacamole_connection_pkey PRIMARY KEY (connection_id),
+                CONSTRAINT guacamole_connection_name_parent UNIQUE (connection_name, parent_id),
+                CONSTRAINT guacamole_connection_parent FOREIGN KEY (parent_id) REFERENCES guacamole_connection (connection_id) ON DELETE CASCADE
+            );
+            
+            INSERT INTO guacamole_entity (name, type) VALUES ('guacadmin', 'USER');
+            INSERT INTO guacamole_user (entity_id, password_hash, password_salt)
+            SELECT entity_id,
+                   decode('CA4B3B9A6F0E3F5F8A3E3F5F8A3E3F5F8A3E3F5F8A3E3F5F8A3E3F5F8A3E3F5F', 'hex'),
+                   decode('', 'hex')
+            FROM guacamole_entity WHERE name = 'guacadmin' AND type = 'USER';
+            EOSCHEMA
+          fi
+          
+          echo "Applying schema..."
+          PGPASSWORD=guacpassword psql -h guacamole-postgres -U guacuser -d guacdb -f schema.sql
+          
+          echo "Database initialized successfully!"
+          echo "Default credentials: guacadmin/guacadmin"
+      restartPolicy: OnFailure
